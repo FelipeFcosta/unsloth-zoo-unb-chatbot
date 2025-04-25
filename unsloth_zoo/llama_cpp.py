@@ -33,7 +33,7 @@ import contextlib
 import os
 
 LLAMA_CPP_CONVERT_FILE = \
-    "  https://raw.githubusercontent.com/ggerganov/llama.cpp/dc39a5e7a84815a90fa0c515ed8927870cf858c9/convert_hf_to_gguf.py"
+    "https://raw.githubusercontent.com/ggerganov/llama.cpp/dc39a5e7a84815a90fa0c515ed8927870cf858c9/convert_hf_to_gguf.py"
 
 COMMANDS_NOT_FOUND = (
     "command not found",
