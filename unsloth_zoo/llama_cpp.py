@@ -361,12 +361,14 @@ def _download_convert_hf_to_gguf(
     supported_types = re.findall(r"[\'\"]([^\'\"]{1,})[\'\"]", supported_types)
     supported_types = frozenset(supported_types)
 
-    print("Applying temporary patch to add Gemma3ForCausalLM to supported types...")
+    print("Applying temporary patch to add Gemma3ForCausalLM and Gemma3ForConditionalGeneration to supported types...")
     temp_list = list(supported_types)
     if "Gemma3ForCausalLM" not in temp_list:
         temp_list.append("Gemma3ForCausalLM")
+    if "Gemma3ForConditionalGeneration" not in temp_list:
+        temp_list.append("Gemma3ForConditionalGeneration")
     supported_types = frozenset(temp_list)
-    print(f"Patched supported types now includes Gemma3: {'Gemma3ForCausalLM' in supported_types}")
+    print(f"Patched supported types now includes Gemma3: {'Gemma3ForCausalLM' in supported_types and 'Gemma3ForConditionalGeneration' in supported_types}")
 
     # Sometimes gguf.x cannot be found!
     archs = list(set(re.findall(rb"[\n\s]gguf\.([\.A-Z\_0-9]{3,})[\n\s\,]", converter_latest)))
