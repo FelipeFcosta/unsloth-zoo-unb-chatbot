@@ -340,7 +340,122 @@ def install_llama_cpp(
     return quantizer, converter
 pass
 
+@lru_cache(1)
+def _download_convert_hf_to_gguf(
+    name = "unsloth_convert_hf_to_gguf",
+):
+    # All Unsloth Zoo code licensed under LGPLv3
+    # Downloads from llama.cpp's Github repo
+    try:
+        converter_latest = requests.get(LLAMA_CPP_CONVERT_FILE).content
+    except:
+        raise RuntimeError(
+            f"Unsloth: Could not obtain `{LLAMA_CPP_CONVERT_FILE}`.\n"\
+            f"Maybe you don't have internet ocnnection?"
+        )
 
+    # Get all supported models
+    supported_types = re.findall(rb"@Model\.register\(([^)]{1,})\)", converter_latest)
+    supported_types = b", ".join(supported_types).decode("utf-8")
+    supported_types = re.findall(r"[\'\"]([^\'\"]{1,})[\'\"]", supported_types)
+    supported_types = frozenset(supported_types)
+
+    print("Applying temporary patch to add Gemma3ForCausalLM to supported types...")
+    temp_list = list(supported_types)
+    if "Gemma3ForCausalLM" not in temp_list:
+        temp_list.append("Gemma3ForCausalLM")
+    supported_types = frozenset(temp_list)
+    print(f"Patched supported types now includes Gemma3: {'Gemma3ForCausalLM' in supported_types}")
+
+    # Sometimes gguf.x cannot be found!
+    archs = list(set(re.findall(rb"[\n\s]gguf\.([\.A-Z\_0-9]{3,})[\n\s\,]", converter_latest)))
+    archs = [x.decode("utf-8") for x in archs]
+    all_edits = "\n\n".join(
+        f"try: gguf.{x}\nexcept: gguf.{x} = None"
+        for x in archs
+    ).encode("utf-8")
+
+    # Make main() become main(args)
+    changes = [
+        (b"import gguf", b"import gguf\n" + all_edits,),
+        # (b"def main()",  b"def main(args)",),
+        # (b"args = parse_args()", b"",),
+    ]
+    for old, new in changes:
+        if old not in converter_latest:
+            raise RuntimeError(
+                f"Unsloth: Could not patch `{old}` - Report immediately as a bug - llama.cpp is broken!"
+            )
+        converter_latest = converter_latest.replace(old, new, 1)
+    pass
+
+    # Fix metadata
+    converter_latest = re.sub(
+        rb"(self\.metadata \= .+?\(.+?\)"\
+        rb"[\n]{1,}([\s]{4,}))",
+        rb"\1"\
+        rb"if hasattr(self.metadata, 'quantized_by'): self.metadata.quantized_by = 'Unsloth'\n"\
+        rb"\2if hasattr(self.metadata, 'repo_url'): self.metadata.repo_url = 'https://huggingface.co/unsloth'\n"\
+        rb"\2if hasattr(self.metadata, 'tags'): self.metadata.tags = ['unsloth', 'llama.cpp']\n"\
+        rb"\2",
+        converter_latest,
+    )
+
+    # Write file
+    with open(f"llama.cpp/{name}.py", "wb") as file:
+        file.write(converter_latest)
+    filename = f"llama.cpp/{name}.py"
+
+    # Get all flags in parser
+    flags = re.findall(
+        rb"parser\.add_argument\([\s]{4,}[\"\']([^\"\']{1,})[\'\"]", converter_latest,
+    )
+    if len(flags) == 0:
+        raise RuntimeError("Unsloth: Failed parsing convert_hf_to_gguf.py with no flags found.")
+
+    # Get defaults
+    defaults = re.findall(
+        rb"parser\.add_argument\([\s]{4,}[\"\']([^\"\']{1,})[\'\"]"\
+        rb"[^\)]{1,}(?:action|default)[\s\=]{1,}([^\s\,]{1,})", converter_latest,
+    )
+    all_flags = {}
+    for flag, default in defaults:
+        flag = flag.decode("utf-8")
+        if flag.startswith("--"): flag = flag[2:]
+        flag = flag.replace("-", "_")
+
+        default = eval(default.decode("utf-8"))
+        if   default == "store_true":  default = True
+        elif default == "store_false": default = False
+        all_flags[flag] = default
+    pass
+
+    # Rest of flags
+    rest_flags = []
+    for flag in flags:
+        flag = flag.decode("utf-8")
+        if flag.startswith("--"): flag = flag[2:]
+        flag = flag.replace("-", "_")
+        if flag not in all_flags:
+            rest_flags.append(flag)
+    pass
+
+    for flag in ["outfile", "model"]:
+        if flag not in rest_flags:
+            raise RuntimeError(f"Unsloth: Failed parsing convert_hf_to_gguf.py with no `{flag}` found.")
+        else: rest_flags = [x for x in rest_flags if x != flag]
+    pass
+
+    # Rest are just None
+    for flag in rest_flags: all_flags[flag] = None
+
+    # Check mandatory flags:
+    for flag in ["outtype", "split_max_size", "dry_run"]:
+        if flag not in all_flags:
+            raise RuntimeError(f"Unsloth: Failed parsing convert_hf_to_gguf.py with no `{flag}` found.")
+    pass
+    return filename, supported_types
+pass
 
 
 @lru_cache(1)
@@ -547,6 +662,7 @@ def _convert_to_gguf(command, output_filename, print_output = False, print_outpu
         raise RuntimeError(f"Unsloth: Failed to convert {conversion_filename} to GGUF (Reached unexpected final state).")
 
 pass # End of function _convert_to_gguf
+
 
 def _split_str_to_n_bytes(split_str: str) -> int:
     # All Unsloth Zoo code licensed under LGPLv3
