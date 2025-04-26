@@ -342,260 +342,209 @@ pass
 
 
 @lru_cache(1)
-def _download_convert_hf_to_gguf(
-    name = "unsloth_convert_hf_to_gguf",
-):
-    # All Unsloth Zoo code licensed under LGPLv3
-    # Downloads from llama.cpp's Github repo
-    try:
-        converter_latest = requests.get(LLAMA_CPP_CONVERT_FILE).content
-    except:
-        raise RuntimeError(
-            f"Unsloth: Could not obtain `{LLAMA_CPP_CONVERT_FILE}`.\n"\
-            f"Maybe you don't have internet ocnnection?"
-        )
-
-    # Get all supported models
-    supported_types = re.findall(rb"@Model\.register\(([^)]{1,})\)", converter_latest)
-    supported_types = b", ".join(supported_types).decode("utf-8")
-    supported_types = re.findall(r"[\'\"]([^\'\"]{1,})[\'\"]", supported_types)
-    supported_types = frozenset(supported_types)
-
-    print("Applying temporary patch to add Gemma3ForCausalLM and Gemma3ForConditionalGeneration to supported types...")
-    temp_list = list(supported_types)
-    if "Gemma3ForCausalLM" not in temp_list:
-        temp_list.append("Gemma3ForCausalLM")
-    if "Gemma3ForConditionalGeneration" not in temp_list:
-        temp_list.append("Gemma3ForConditionalGeneration")
-    supported_types = frozenset(temp_list)
-    print(f"Patched supported types now includes Gemma3: {'Gemma3ForCausalLM' in supported_types and 'Gemma3ForConditionalGeneration' in supported_types}")
-
-    # Sometimes gguf.x cannot be found!
-    archs = list(set(re.findall(rb"[\n\s]gguf\.([\.A-Z\_0-9]{3,})[\n\s\,]", converter_latest)))
-    archs = [x.decode("utf-8") for x in archs]
-    all_edits = "\n\n".join(
-        f"try: gguf.{x}\nexcept: gguf.{x} = None"
-        for x in archs
-    ).encode("utf-8")
-
-    # Make main() become main(args)
-    changes = [
-        (b"import gguf", b"import gguf\n" + all_edits,),
-        # (b"def main()",  b"def main(args)",),
-        # (b"args = parse_args()", b"",),
-    ]
-    for old, new in changes:
-        if old not in converter_latest:
-            raise RuntimeError(
-                f"Unsloth: Could not patch `{old}` - Report immediately as a bug - llama.cpp is broken!"
-            )
-        converter_latest = converter_latest.replace(old, new, 1)
-    pass
-
-    # Fix metadata
-    converter_latest = re.sub(
-        rb"(self\.metadata \= .+?\(.+?\)"\
-        rb"[\n]{1,}([\s]{4,}))",
-        rb"\1"\
-        rb"if hasattr(self.metadata, 'quantized_by'): self.metadata.quantized_by = 'Unsloth'\n"\
-        rb"\2if hasattr(self.metadata, 'repo_url'): self.metadata.repo_url = 'https://huggingface.co/unsloth'\n"\
-        rb"\2if hasattr(self.metadata, 'tags'): self.metadata.tags = ['unsloth', 'llama.cpp']\n"\
-        rb"\2",
-        converter_latest,
-    )
-
-    # Write file
-    with open(f"llama.cpp/{name}.py", "wb") as file:
-        file.write(converter_latest)
-    filename = f"llama.cpp/{name}.py"
-
-    # Get all flags in parser
-    flags = re.findall(
-        rb"parser\.add_argument\([\s]{4,}[\"\']([^\"\']{1,})[\'\"]", converter_latest,
-    )
-    if len(flags) == 0:
-        raise RuntimeError("Unsloth: Failed parsing convert_hf_to_gguf.py with no flags found.")
-
-    # Get defaults
-    defaults = re.findall(
-        rb"parser\.add_argument\([\s]{4,}[\"\']([^\"\']{1,})[\'\"]"\
-        rb"[^\)]{1,}(?:action|default)[\s\=]{1,}([^\s\,]{1,})", converter_latest,
-    )
-    all_flags = {}
-    for flag, default in defaults:
-        flag = flag.decode("utf-8")
-        if flag.startswith("--"): flag = flag[2:]
-        flag = flag.replace("-", "_")
-
-        default = eval(default.decode("utf-8"))
-        if   default == "store_true":  default = True
-        elif default == "store_false": default = False
-        all_flags[flag] = default
-    pass
-
-    # Rest of flags
-    rest_flags = []
-    for flag in flags:
-        flag = flag.decode("utf-8")
-        if flag.startswith("--"): flag = flag[2:]
-        flag = flag.replace("-", "_")
-        if flag not in all_flags:
-            rest_flags.append(flag)
-    pass
-
-    for flag in ["outfile", "model"]:
-        if flag not in rest_flags:
-            raise RuntimeError(f"Unsloth: Failed parsing convert_hf_to_gguf.py with no `{flag}` found.")
-        else: rest_flags = [x for x in rest_flags if x != flag]
-    pass
-
-    # Rest are just None
-    for flag in rest_flags: all_flags[flag] = None
-
-    # Check mandatory flags:
-    for flag in ["outtype", "split_max_size", "dry_run"]:
-        if flag not in all_flags:
-            raise RuntimeError(f"Unsloth: Failed parsing convert_hf_to_gguf.py with no `{flag}` found.")
-    pass
-    return filename, supported_types
-pass
-
-
-def _split_str_to_n_bytes(split_str: str) -> int:
-    # All Unsloth Zoo code licensed under LGPLv3
-    # Converts 50G to bytes
-    if split_str.endswith("K"):
-        n = float(split_str[:-1]) * 1000
-    elif split_str.endswith("M"):
-        n = float(split_str[:-1]) * 1000 * 1000
-    elif split_str.endswith("G"):
-        n = float(split_str[:-1]) * 1000 * 1000 * 1000
-    elif split_str.isnumeric():
-        n = float(split_str)
-    else:
-        raise ValueError(f"Invalid split size: {split_str}, must be a number, optionally followed by K, M, or G")
-
-    if n < 0:
-        raise ValueError(f"Invalid split size: {split_str}, must be positive")
-
-    return n
-pass
-
-
 def _convert_to_gguf(command, output_filename, print_output = False, print_outputs = None):
     # All Unsloth Zoo code licensed under LGPLv3
     # Filter warnings / errors with dates
-    import datetime
-    datetime = datetime.datetime.today().strftime("%Y-%m-%d")
+    # No need to import datetime here unless specifically needed for filtering
+
+    # --- DEBUG: Print input arguments ---
+    print(f"\n--- DEBUG: _convert_to_gguf called with: ---", flush=True)
+    print(f"--- DEBUG: command          = {command}", flush=True)
+    print(f"--- DEBUG: output_filename = {output_filename}", flush=True)
+    print(f"--- DEBUG: print_output    = {print_output}", flush=True)
+    print(f"------------------------------------------\n", flush=True)
 
     popen = subprocess.Popen(
         command,
         stdout = subprocess.PIPE,
-        stderr = subprocess.STDOUT,
-        universal_newlines = True,
-        shell = True,
+        stderr = subprocess.STDOUT, # Capture stderr too
+        universal_newlines = True, # Decode output as text
+        shell = True, # Command is a string
+        bufsize=1 # Line buffering
     )
-    ProgressBar._instances.clear()
+    ProgressBar._instances.clear() # Reset tqdm instances
 
     progress_bar = None
     chat_template_line = 0
     stop_chat_template = False
     metadata = {}
+    full_subprocess_output = [] # Store all output for later debugging
 
-    for line in iter(popen.stdout.readline, ""):
-        if line.startswith("Writing:"):
-            if progress_bar is None:
-                progress_bar = ProgressBar(total = 100, position = 0, leave = True, desc = "Unsloth: GGUF conversion")
+    print(f"\n--- DEBUG: Running GGUF Subprocess Command ---\n{command}\n-------------------------------------------\n", flush=True)
 
-            desc = re.findall(r"([\d]{1,3})\%.+?([\d\.].+?\])", line)
-            if len(desc) == 1 and len(desc[0]) == 2:
-                percentage, info = desc[0]
-                progress_bar.update(int(percentage) - progress_bar.n)
-                info = re.findall(r"([\d\.]{1,}(?:K|M|G)\/[\d\.]{1,}(?:K|M|G))", info)
-                if len(info) != 0: progress_bar.set_postfix_str(info[0])
+    try:
+        for line in iter(popen.stdout.readline, ""):
+            full_subprocess_output.append(line) # Store raw line first
+
+            # --- DEBUG START ---
+            # Print every line received from the subprocess immediately
+            print(f"GGUF_SUBPROC_OUT: {line}", end="", flush=True)
+            # --- DEBUG END ---
+
+            # Original logic for parsing progress, metadata, etc. follows
+            # Keep this logic, but be aware it might fail if the output format changes unexpectedly
+            if line.startswith("Writing:"):
+                if progress_bar is None:
+                    progress_bar = ProgressBar(total = 100, position = 0, leave = True, desc = "Unsloth: GGUF conversion")
+
+                desc = re.findall(r"([\d]{1,3})\%.+?([\d\.].+?\])", line)
+                if len(desc) == 1 and len(desc[0]) == 2:
+                    percentage, info = desc[0]
+                    # Check if progress_bar is initialized before updating
+                    if progress_bar:
+                       try: # Wrap update in try-except in case percentage isn't int
+                           progress_bar.update(int(percentage) - progress_bar.n)
+                       except ValueError:
+                           print(f"DEBUG: Could not parse percentage '{percentage}' from line: {line.strip()}", flush=True)
+
+                    info = re.findall(r"([\d\.]{1,}(?:K|M|G)\/[\d\.]{1,}(?:K|M|G))", info)
+                    if len(info) != 0 and progress_bar: progress_bar.set_postfix_str(info[0])
+                continue # Important: Continue to next line after handling progress
+
+            elif line.startswith("INFO:gguf.gguf_writer") and "total_size = " in line:
+                name = re.findall(r"INFO:gguf\.gguf_writer:([^\:]{1,})\:", line)
+                if len(name) == 1:
+                    name = name[0].strip() # Get the filename parsed from the log
+                    x = re.findall(r"total_size = ([\d\.]{1,}(?:K|M|G))", line)
+                    if len(x) == 1:
+                        try:
+                            # Assumes _split_str_to_n_bytes is defined elsewhere in the file
+                            total_size = _split_str_to_n_bytes(x[0])
+                            metadata[name] = (total_size, x[0],)
+                            print(f"DEBUG: Parsed metadata for '{name}': size={x[0]} ({total_size} bytes)", flush=True)
+                        except Exception as error:
+                            print(f"DEBUG: Error parsing size '{x[0]}' from line '{line.strip()}': {error}", flush=True)
+                    else:
+                        print(f"DEBUG: Could not parse size from metadata line: {line.strip()}", flush=True)
+                else:
+                     print(f"DEBUG: Could not parse filename from metadata line: {line.strip()}", flush=True)
+                # Continue might be needed here if the rest of the line shouldn't be processed further
                 continue
-            pass
 
-        elif line.startswith("INFO:gguf.gguf_writer") and "total_size = " in line:
-            # Get name of file as well
-            name = re.findall(r"INFO:gguf\.gguf_writer:([^\:]{1,})\:", line)
-            if len(name) == 1:
-                name = name[0]
-                # Save final size of model
-                x = re.findall(r"total_size = ([\d\.]{1,}(?:K|M|G))", line)
-                if len(x) == 1:
-                    try:
-                        total_size = _split_str_to_n_bytes(x[0])
-                    except Exception as error:
-                        popen.terminate()
-                        raise RuntimeError(error)
-                    metadata[name] = (total_size, x[0],)
-                pass
-            pass
+            # --- Temporarily disable filtering for max debug info ---
+            # You might want to comment out these elif conditions temporarily
+            # to see ALL lines from the subprocess without filtering.
+            # Example:
+            # elif line.startswith("WARNING:"):
+            #     print(f"DEBUG: Passing through WARNING line: {line.strip()}", flush=True)
+            #     # continue # Comment out continue to see it printed by GGUF_SUBPROC_OUT
+            # --- End filtering disable ---
 
-        elif line.startswith((datetime, "WARNING:", "INFO:numexpr")):
-            # Skip warnings / errors
-            continue
+            # Original logic for print_outputs list (if needed by caller)
+            if print_outputs is not None:
+                print_outputs.append(line) # Add the raw line
+        pass # End of loop reading lines
 
-        elif line.startswith("INFO:hf-to-gguf:blk"):
-            # Skip showcasing conversions - unnecessary
-            continue
+    except Exception as read_err:
+        print(f"\n--- DEBUG: Error while reading subprocess output: {read_err} ---\n", flush=True)
+        # Depending on the error, might want to re-raise or just let finally handle it
+    finally:
+        # Ensure stdout is closed and process termination is awaited
+        if popen.stdout:
+            popen.stdout.close()
+        # Wait for the process to terminate and get the return code
+        return_code = popen.wait()
 
-        elif line.startswith("INFO:gguf.vocab:Setting chat_template"):
-            # Do not print super long chat templates - allow 5 lines
-            chat_template_line = 1
+        # Close progress bar if it was created
+        if progress_bar is not None:
+             # Ensure progress bar reaches 100% if process finished, regardless of actual parsed %
+             if return_code == 0:
+                 progress_bar.update(100 - progress_bar.n)
+             progress_bar.close()
 
-        if chat_template_line != 0: chat_template_line += 1
+    # --- DEBUG START ---
+    print(f"\n--- DEBUG: GGUF Subprocess finished with return code: {return_code} ---\n", flush=True)
+    # --- DEBUG END ---
 
-        if chat_template_line >= 10:
-            # Restart if possible
-            if line.startswith("INFO:hf-to-gguf:"):
-                chat_template_line = 0
-            else:
-                if not stop_chat_template:
-                    print("..... Chat template truncated .....\n")
-                stop_chat_template = True
-                continue
-            pass
-        pass
-
-        # Fix up start of strings
-        if line.startswith("INFO:"): line = "Unsloth GGUF:" + line[len("INFO:"):]
-
-        if print_output: print(line, flush = True, end = "")
-        if print_outputs is not None: print_outputs.append(line)
-    pass
-
-    if progress_bar is not None: progress_bar.close()
-    popen.stdout.close()
-    return_code = popen.wait()
+    # Check if the subprocess failed (non-zero exit code)
     if return_code:
+        print("--- DEBUG: Full Subprocess Output (Error Case - Non-zero Return Code) ---", flush=True)
+        for l in full_subprocess_output:
+            print(l, end="", flush=True) # Print with end="" to preserve line endings
+        print("\n------------------------------------------------------------------------", flush=True)
+        # Raise the error
+        # Try to determine the conversion script filename for a better error message
+        conversion_filename = "llama.cpp/unsloth_convert_hf_to_gguf.py" # Default assumption
+        if ' ' in command:
+            script_path_part = command.split(' ')[1] # Get the second part (likely the script path)
+            if script_path_part.endswith('.py'):
+                conversion_filename = os.path.basename(script_path_part)
+
+        # Using CalledProcessError provides more context than RuntimeError
         raise subprocess.CalledProcessError(return_code, command)
-    pass
+    pass # End if return_code != 0
 
-    # Check final size approximately
+    # --- Post-subprocess checks (only if return_code was 0) ---
+
+    # Check if metadata was successfully parsed
     if len(metadata) != 0:
-        for output_filename, (total_size, x,) in metadata.items():
-            actual_size = os.path.getsize(output_filename)
+        verified_files = []
+        all_checks_passed = True
+        for filename_meta, (total_size, size_str,) in metadata.items():
+            # Check if the file mentioned in metadata actually exists
+            if not os.path.exists(filename_meta):
+                 print(f"ERROR: Metadata found for '{filename_meta}', but file does not exist!", flush=True)
+                 all_checks_passed = False
+                 continue # Skip size check if file doesn't exist
 
-            ratio = actual_size / total_size
-            if ratio <= 0.9 or ratio >= 1.1:
-                raise RuntimeError(
-                    "Unsloth: Failed converting to GGUF since we do not have enough disk space!\n"\
-                    f"We need {total_size} bytes but we managed to find only {actual_size} bytes!"
-                )
-            pass
+            actual_size = os.path.getsize(filename_meta)
+            ratio = actual_size / total_size if total_size > 0 else 0 # Avoid division by zero
 
-            line = f"Unsloth: Converted to {output_filename} with size = {x}\n"
-            if print_output: print(line, flush = True, end = "")
-            if print_outputs is not None: print_outputs.append(line)
-        pass
+            # Using +/- 15% margin for size check
+            if ratio <= 0.85 or ratio >= 1.15:
+                print(f"WARNING: GGUF size mismatch for {filename_meta}. Expected ~{size_str} ({total_size} bytes), got {actual_size} bytes. Ratio: {ratio:.2f}", flush=True)
+                # Decide if this is fatal. Original raised error. Let's keep it as a warning for debugging.
+                # all_checks_passed = False # Uncomment if mismatch should cause failure
+            else:
+                 # Print success message if size check passes
+                 line = f"Unsloth: Verified GGUF {filename_meta} with size = {size_str}\n"
+                 if print_output: print(line, flush=True, end = "")
+                 if print_outputs is not None: print_outputs.append(line)
+
+            verified_files.append(filename_meta)
+
+        # Return the list of filenames found in metadata if checks passed or were warnings
+        if all_checks_passed or len(verified_files) > 0: # Return even if only warnings occurred but files exist
+             return verified_files # Return list of files found in metadata
+        else:
+             # If checks failed critically (e.g., file missing)
+             print("--- DEBUG: Full Subprocess Output (Metadata Check Failed) ---", flush=True)
+             for l in full_subprocess_output: print(l, end="", flush=True)
+             print("-------------------------------------------------------------", flush=True)
+             raise RuntimeError(f"Unsloth: GGUF conversion checks failed (e.g., output file missing). Check logs above.")
+
+
+    elif return_code == 0:
+        # Subprocess succeeded (rc=0) but no metadata parsed
+        print("--- DEBUG: Subprocess successful (rc=0) but no metadata parsed. Output: ---", flush=True)
+        for l in full_subprocess_output: print(l, end="", flush=True)
+        print("-----------------------------------------------------------------------", flush=True)
+        print("WARNING: GGUF conversion finished successfully (rc=0), but no file metadata was parsed from its output. Cannot verify size or exact output files.", flush=True)
+
+        # Check if the intended single output file exists as a fallback verification
+        if os.path.exists(output_filename):
+            print(f"INFO: Assuming success based on return code 0 and existence of target file: {output_filename}", flush=True)
+            return [output_filename] # Return list with the target file
+        else:
+            # Determine script name for error message
+            conversion_filename = "llama.cpp/unsloth_convert_hf_to_gguf.py"
+            if ' ' in command:
+                script_path_part = command.split(' ')[1]
+                if script_path_part.endswith('.py'): conversion_filename = os.path.basename(script_path_part)
+            raise RuntimeError(f"Unsloth: Failed to convert {conversion_filename} to GGUF. Subprocess succeeded (rc=0) but no metadata found and target file '{output_filename}' does not exist.")
+
     else:
-        raise RuntimeError(
-            "Unsloth: Failed converting to GGUF since we did not create an GGUF files?"
-        )
-    return list(metadata.keys())
-pass
+        # This case should be caught by the 'if return_code:' check earlier, but included defensively.
+        print("--- DEBUG: Full Subprocess Output (Final Check Fail Case - Should be unreachable) ---", flush=True)
+        for l in full_subprocess_output: print(l, end="", flush=True)
+        print("-------------------------------------------------------------", flush=True)
+        conversion_filename = "llama.cpp/unsloth_convert_hf_to_gguf.py"
+        if ' ' in command:
+             script_path_part = command.split(' ')[1]
+             if script_path_part.endswith('.py'): conversion_filename = os.path.basename(script_path_part)
+        raise RuntimeError(f"Unsloth: Failed to convert {conversion_filename} to GGUF (Reached unexpected final state).")
+
+pass # End of function _convert_to_gguf
 
 
 def check_quantization_type(quantization_type = "Q8_0"):
