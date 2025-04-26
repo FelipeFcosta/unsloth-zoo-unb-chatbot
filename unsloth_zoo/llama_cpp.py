@@ -459,6 +459,25 @@ def _download_convert_hf_to_gguf(
     return filename, supported_types
 pass
 
+def _split_str_to_n_bytes(split_str: str) -> int:
+    # All Unsloth Zoo code licensed under LGPLv3
+    # Converts 50G to bytes
+    if split_str.endswith("K"):
+        n = float(split_str[:-1]) * 1000
+    elif split_str.endswith("M"):
+        n = float(split_str[:-1]) * 1000 * 1000
+    elif split_str.endswith("G"):
+        n = float(split_str[:-1]) * 1000 * 1000 * 1000
+    elif split_str.isnumeric():
+        n = float(split_str)
+    else:
+        raise ValueError(f"Invalid split size: {split_str}, must be a number, optionally followed by K, M, or G")
+
+    if n < 0:
+        raise ValueError(f"Invalid split size: {split_str}, must be positive")
+
+    return n
+pass
 
 @lru_cache(1)
 def _convert_to_gguf(command, output_filename, print_output = False, print_outputs = None):
@@ -665,26 +684,6 @@ def _convert_to_gguf(command, output_filename, print_output = False, print_outpu
 
 pass # End of function _convert_to_gguf
 
-
-def _split_str_to_n_bytes(split_str: str) -> int:
-    # All Unsloth Zoo code licensed under LGPLv3
-    # Converts 50G to bytes
-    if split_str.endswith("K"):
-        n = float(split_str[:-1]) * 1000
-    elif split_str.endswith("M"):
-        n = float(split_str[:-1]) * 1000 * 1000
-    elif split_str.endswith("G"):
-        n = float(split_str[:-1]) * 1000 * 1000 * 1000
-    elif split_str.isnumeric():
-        n = float(split_str)
-    else:
-        raise ValueError(f"Invalid split size: {split_str}, must be a number, optionally followed by K, M, or G")
-
-    if n < 0:
-        raise ValueError(f"Invalid split size: {split_str}, must be positive")
-
-    return n
-pass
 
 
 
